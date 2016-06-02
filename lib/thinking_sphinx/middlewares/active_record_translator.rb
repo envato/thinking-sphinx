@@ -31,15 +31,28 @@ class ThinkingSphinx::Middlewares::ActiveRecordTranslator <
     attr_reader :context
 
     def ids_for_model(model_name)
-      context[:results].collect { |row|
-        row['sphinx_internal_id'] if row['sphinx_internal_class'] == model_name
-      }.compact
+      if ModelCRCLookup.use_crc?(context[:results].first)
+        model_name_crc = Zlib.crc32(model_name)
+        (context[:results].map do |row|
+          row['sphinx_internal_id'] if row['class_crc'] == model_name_crc
+        end).compact
+      else
+        (context[:results].map do |row|
+          row['sphinx_internal_id'] if row['sphinx_internal_class'] == model_name
+        end).compact
+      end
     end
 
     def model_names
-      @model_names ||= context[:results].collect { |row|
-        row['sphinx_internal_class']
-      }.uniq
+      if ModelCRCLookup.use_crc?(context[:results].first)
+        @model_names ||= (context[:results].map do |row|
+          ModelCRCLookup.lookup(row['class_crc'])
+        end).uniq
+      else
+        @model_names ||= (context[:results].map do |row|
+          row['sphinx_internal_class']
+        end).uniq
+      end
     end
 
     def reset_memos
@@ -48,9 +61,15 @@ class ThinkingSphinx::Middlewares::ActiveRecordTranslator <
     end
 
     def result_for(row)
-      results_for_models[row['sphinx_internal_class']].detect { |record|
-        record.id == row['sphinx_internal_id']
-      }
+      if ModelCRCLookup.use_crc?(row)
+        results_for_models[ModelCRCLookup.lookup(row['class_crc'])].detect do |record|
+          record.id == row['sphinx_internal_id']
+        end
+      else
+        results_for_models[row['sphinx_internal_class']].detect do |record|
+          record.id == row['sphinx_internal_id']
+        end
+      end
     end
 
     def results_for_models
@@ -75,6 +94,29 @@ class ThinkingSphinx::Middlewares::ActiveRecordTranslator <
 
     def sql_options
       context.search.options[:sql] || {}
+    end
+  end
+
+  class ModelCRCLookup
+    class ModelNotFound < StandardError; end
+
+    @@crcs = nil
+
+    def self.use_crc?(row)
+      row && row.has_key?('class_crc')
+    end
+
+    def self.lookup(crc)
+      if @@crcs.nil?
+        Rails.application.eager_load!
+        @@crcs = Hash[ActiveRecord::Base.descendants.map { |klass| [ Zlib.crc32(klass.name), klass.name ] } ]
+      end
+
+      @@crcs[crc] || raise(ModelNotFound.new("No Model found for crc: #{crc}"))
+    end
+
+    def self.clear
+      @@crcs = nil
     end
   end
 end
